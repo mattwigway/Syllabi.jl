@@ -69,13 +69,17 @@ end
 function parse_doc(body::AbstractString)
     front_matter = YAML.load(body)
 
+    excluded_dates = [x[1] for x in front_matter["excluded_dates"]]
+    excluded_date_reasons = [x[2] for x in front_matter["excluded_dates"]]
+    exsort = sortperm(excluded_dates)
+
     # build the syllabus object
     syllabus = Syllabus(
         front_matter["start_date"],
         front_matter["end_date"],
         parse_day_of_week.(collect(front_matter["days_of_week"])),
-        [x[1] for x in front_matter["excluded_dates"]],
-        [x[2] for x in front_matter["excluded_dates"]],
+        excluded_dates[exsort],
+        excluded_date_reasons[exsort],
         front_matter["added_dates"]
     )
 
@@ -103,6 +107,15 @@ function parse_doc(body::AbstractString)
             else
                 # we are in a schedule section
                 if hlevel == schedule_day_header_level
+                    # figure out if we need to add excluded dates - do this here so it's after any content associated with previous date
+                    for (date, text) in zip(syllabus.excluded_dates, syllabus.excluded_date_reasons)
+                        if date < class_dates[current_date_index] && (current_date_index == 1 || date > class_dates[current_date_index - 1])
+                            push!(output, Markdown.Header{schedule_day_header_level}(["$(Dates.format(date, DATEFORMAT)): No class"]))
+                            push!(output, Markdown.Paragraph([text]))
+                        end
+                    end
+
+
                     # add the date
                     text, ndays = parse_header(element.text[1])
                     dates = class_dates[current_date_index:current_date_index+(ndays - 1)]
