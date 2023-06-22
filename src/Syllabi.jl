@@ -55,6 +55,17 @@ end
 
 get_header_level(::Markdown.Header{T}) where T = T
 
+# figure out multi-day classes
+function parse_header(str)
+    exp = r"(.*) ?\{.*days ?= ?([0-9]+)\}"
+    if contains(str, exp)
+        m = match(exp, str)
+        return m.captures[1], parse(Int64, m.captures[2])
+    else
+        return str, 1
+    end
+end
+
 function parse_doc(body::AbstractString)
     front_matter = YAML.load(body)
 
@@ -93,9 +104,11 @@ function parse_doc(body::AbstractString)
                 # we are in a schedule section
                 if hlevel == schedule_day_header_level
                     # add the date
-                    date = class_dates[current_date_index]
-                    current_date_index += 1
-                    push!(output, Markdown.Header{schedule_day_header_level}(["$(Dates.format(date, DATEFORMAT)): $(element.text[1])"]))
+                    text, ndays = parse_header(element.text[1])
+                    dates = class_dates[current_date_index:current_date_index+(ndays - 1)]
+                    current_date_index += ndays
+                    date_text = join(Dates.format.(dates, DATEFORMAT), ", ")
+                    push!(output, Markdown.Header{schedule_day_header_level}(["$date_text: $text"]))
                 elseif hlevel > schedule_day_header_level
                     # no longer in a schedule section
                     in_schedule_section = false
