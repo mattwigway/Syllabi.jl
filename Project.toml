@@ -3,6 +3,11 @@ uuid = "68b49f8f-4574-43ac-a1c5-b6e71211e06a"
 authors = ["Matt Bhagat-Conway <matt@indicatrix.org> and contributors"]
 version = "1.0.0-DEV"
 
+[deps]
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Markdown = "d6f4376e-aef5-505a-96c1-9c027394607a"
+YAML = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
+
 [compat]
 julia = "1"
 
