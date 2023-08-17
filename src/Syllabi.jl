@@ -6,6 +6,9 @@ import Dates: Date, dayofweek, @dateformat_str
 import YAML
 
 const DATEFORMAT = dateformat"U d"
+const ANCHOR_REGEX = r"%%(?:[[:alnum:]]|[_\-])+"
+const XREF_REGEX = r"@@(?:[[:alnum:]]|[_\-])+"
+
 
 # Write your package code here.
 struct Syllabus
@@ -26,7 +29,7 @@ function get_all_class_dates(s::Syllabus)
 
     while current ≤ s.end_date
         current = Dates.tonext(d -> dayofweek(d) ∈ s.days_of_week, current)
-        if current ∉ s.excluded_dates
+        if current ∉ s.excluded_dates && current ≤ s.end_date
             push!(result, current)
         end
     end
@@ -66,6 +69,78 @@ function parse_header(str)
     end
 end
 
+# markdown elements where the content is in the vector .text
+const ElementWithText = Union{Markdown.Header, Markdown.Italic, Markdown.Bold, Markdown.Link}
+
+# markdown elements where the content is in the vector .content
+const ElementWithContent = Union{Markdown.Paragraph}
+
+function parse_references!(s::AbstractString, cross_refs, date)
+    for anchor in eachmatch(ANCHOR_REGEX, s)
+        anchtext = lowercase(anchor.match[3:end])
+        if haskey(cross_refs, anchtext)
+            println("Warn: duplicate anchor definition $anchtext")
+        else
+            cross_refs[anchtext] = date
+        end
+    end
+
+    # remove anchors from text
+    return replace(s, ANCHOR_REGEX=>"")
+end
+
+function parse_references!(element::ElementWithText, cross_refs, date)
+    map!(t -> parse_references!(t, cross_refs, date), element.text, element.text)
+    return element
+end
+
+function parse_references!(element::ElementWithContent, cross_refs, date)
+    map!(t -> parse_references!(t, cross_refs, date), element.content, element.content)
+    return element
+end
+
+function parse_references!(element::Markdown.List, cross_refs, date)
+    map!(i -> parse_references!(i, cross_refs, date), element.items, element.items)
+    return element
+end
+
+function parse_references!(element::Markdown.Table, cross_refs, date)
+    map!(r -> parse_references!(r, cross_refs, date), element.rows, element.rows)
+end
+
+function parse_references!(vec::AbstractVector, cross_refs, date)
+    map!(r -> parse_references!(r, cross_refs, date), vec, vec)
+    return vec
+end
+
+# Note: this version does not actually mutate its arguments, but needs to have the same signature as the ones that do
+replace_references!(s::AbstractString, cross_refs) = replace(s, XREF_REGEX=>(r -> Dates.format(cross_refs[lowercase(r[3:end])], DATEFORMAT)))
+
+function replace_references!(element::ElementWithText, cross_refs)
+    map!(t -> replace_references!(t, cross_refs), element.text, element.text)
+    return element
+end
+
+function replace_references!(element::ElementWithContent, cross_refs)
+    map!(t -> replace_references!(t, cross_refs), element.content, element.content)
+    return element
+end
+
+function replace_references!(element::Markdown.List, cross_refs)
+    map!(t -> replace_references!(t, cross_refs), element.items, element.items)
+    return element
+end
+
+function replace_references!(element::Markdown.Table, cross_refs)
+    map!(t -> replace_references!(t, cross_refs), element.rows, element.rows)
+    return element
+end
+
+function replace_references!(vec::AbstractVector, cross_refs)
+    map!(t -> replace_references!(t, cross_refs), vec, vec)
+    return vec
+end
+
 function parse_doc(body::AbstractString)
     front_matter = YAML.load(body)
 
@@ -83,56 +158,99 @@ function parse_doc(body::AbstractString)
         front_matter["added_dates"]
     )
 
-    doc = Markdown.parse(last(split(body, "---")))
+    # split only on lines that are ---, not any line that contains ---
+    # ^ and $ refer to the entire document, not individual lines, for split()
+    doc = Markdown.parse(last(split(body, r"(^|\n)---\n")))
     output = []
     
     # find the schedule section
     class_dates = get_all_class_dates(syllabus)
     current_date_index = 1
+    next_date_index = 1
     schedule_day_header_level = 0
     in_schedule_section = false
 
-    for element in doc.content
-        if element isa Markdown.Header
-            hlevel = get_header_level(element)
+    # run this twice to get cross-refs right
+    cross_refs = Dict{String, Date}()
 
-            if !in_schedule_section
-                # are we entering a schedule section?
-                if contains(lowercase(element.text[1]), "schedule")
-                    in_schedule_section = true
-                    schedule_day_header_level = hlevel + 1
+    for pass in [:references, :output]
+        if pass == output
+            println("Referenced dates: $cross_refs")
+        end
+        # NB anchors can't be in schedule headers
+        for element in doc.content
+            # handle cross references
+
+            if pass == :references
+                if in_schedule_section
+                    parse_references!(element, cross_refs, class_dates[current_date_index])
                 end
-
-                push!(output, element)
             else
-                # we are in a schedule section
-                if hlevel == schedule_day_header_level
-                    # figure out if we need to add excluded dates - do this here so it's after any content associated with previous date
-                    for (date, text) in zip(syllabus.excluded_dates, syllabus.excluded_date_reasons)
-                        if date < class_dates[current_date_index] && (current_date_index == 1 || date > class_dates[current_date_index - 1])
-                            push!(output, Markdown.Header{schedule_day_header_level}(["$(Dates.format(date, DATEFORMAT)): No class"]))
-                            push!(output, Markdown.Paragraph([text]))
-                        end
+                replace_references!(element, cross_refs)
+            end
+
+            if element isa Markdown.Header
+                hlevel = get_header_level(element)
+
+                if !in_schedule_section
+                    # are we entering a schedule section?
+                    if contains(lowercase(element.text[1]), "schedule")
+                        in_schedule_section = true
+                        schedule_day_header_level = hlevel + 1
                     end
 
-
-                    # add the date
-                    text, ndays = parse_header(element.text[1])
-                    dates = class_dates[current_date_index:current_date_index+(ndays - 1)]
-                    current_date_index += ndays
-                    date_text = join(Dates.format.(dates, DATEFORMAT), ", ")
-                    push!(output, Markdown.Header{schedule_day_header_level}(["$date_text: $text"]))
-                elseif hlevel > schedule_day_header_level
-                    # no longer in a schedule section
-                    in_schedule_section = false
-                    current_date_index = 1
-                    push!(output, element)
+                    if pass == :output
+                        push!(output, element)
+                    end
                 else
+                    # we are in a schedule section
+                    if hlevel == schedule_day_header_level
+                        text, ndays = parse_header(element.text[1])
+                        current_date_index = next_date_index
+
+                        if current_date_index + ndays - 1 > length(class_dates)
+                            error("Too many class dates (occurred at day $text)")
+                        end    
+
+                        # figure out if we need to add excluded dates - do this here so it's after any content associated with previous date
+                        for (date, ex_text) in zip(syllabus.excluded_dates, syllabus.excluded_date_reasons)
+                            if date < class_dates[current_date_index] && (current_date_index == 1 || date > class_dates[current_date_index - 1])
+                                if pass == :output
+                                    push!(output, Markdown.Header{schedule_day_header_level}(["$(Dates.format(date, DATEFORMAT)): No class"]))
+                                    push!(output, Markdown.Paragraph([ex_text]))
+                                end
+                            end
+                        end
+
+
+                        # add the date
+                        dates = class_dates[current_date_index:current_date_index+(ndays - 1)]
+                        next_date_index = current_date_index + ndays
+                        date_text = join(Dates.format.(dates, DATEFORMAT), ", ")
+
+                        if pass == :output
+                            push!(output, Markdown.Header{schedule_day_header_level}(["$date_text: $text"]))
+                        end
+                    elseif hlevel < schedule_day_header_level
+                        # no longer in a schedule section
+                        in_schedule_section = false
+                        current_date_index = 1
+                        next_date_index = 1
+
+                        if pass == :output
+                            push!(output, element)
+                        end
+                    else
+                        if pass == :output
+                            push!(output, element)
+                        end
+                    end
+                end
+            else
+                if pass == :output
                     push!(output, element)
                 end
             end
-        else
-            push!(output, element)
         end
     end
 
