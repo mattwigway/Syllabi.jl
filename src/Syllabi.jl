@@ -6,7 +6,7 @@ import Dates: Date, dayofweek, @dateformat_str
 import YAML
 
 const DATEFORMAT = dateformat"U d"
-const ANCHOR_REGEX = r"%%(?:[[:alnum:]]|[_\-])+"
+const ANCHOR_REGEX = r"%%((?:[[:alnum:]]|[_\-])+)~?(-?[0-9]+)?"
 const XREF_REGEX = r"@@(?:[[:alnum:]]|[_\-])+"
 
 
@@ -75,13 +75,15 @@ const ElementWithText = Union{Markdown.Header, Markdown.Italic, Markdown.Bold, M
 # markdown elements where the content is in the vector .content
 const ElementWithContent = Union{Markdown.Paragraph}
 
-function parse_references!(s::AbstractString, cross_refs, date)
+function parse_references!(s::AbstractString, cross_refs, class_dates, current_date_index)
     for anchor in eachmatch(ANCHOR_REGEX, s)
-        anchtext = lowercase(anchor.match[3:end])
+        anchtext = lowercase(anchor.captures[1])
         if haskey(cross_refs, anchtext)
             println("Warn: duplicate anchor definition $anchtext")
         else
-            cross_refs[anchtext] = date
+            # figure out offsets - ~ means offset in class days
+            class_day_offset = isnothing(anchor.captures[2]) ? 0 : parse(Int64, anchor.captures[2])
+            cross_refs[anchtext] = class_dates[current_date_index + class_day_offset]
         end
     end
 
@@ -89,27 +91,27 @@ function parse_references!(s::AbstractString, cross_refs, date)
     return replace(s, ANCHOR_REGEX=>"")
 end
 
-function parse_references!(element::ElementWithText, cross_refs, date)
-    map!(t -> parse_references!(t, cross_refs, date), element.text, element.text)
+function parse_references!(element::ElementWithText, cross_refs, class_dates, current_date_index)
+    map!(t -> parse_references!(t, cross_refs, class_dates, current_date_index), element.text, element.text)
     return element
 end
 
-function parse_references!(element::ElementWithContent, cross_refs, date)
-    map!(t -> parse_references!(t, cross_refs, date), element.content, element.content)
+function parse_references!(element::ElementWithContent, cross_refs, class_dates, current_date_index)
+    map!(t -> parse_references!(t, cross_refs, class_dates, current_date_index), element.content, element.content)
     return element
 end
 
-function parse_references!(element::Markdown.List, cross_refs, date)
-    map!(i -> parse_references!(i, cross_refs, date), element.items, element.items)
+function parse_references!(element::Markdown.List, cross_refs, class_dates, current_date_index)
+    map!(i -> parse_references!(i, cross_refs, class_dates, current_date_index), element.items, element.items)
     return element
 end
 
-function parse_references!(element::Markdown.Table, cross_refs, date)
-    map!(r -> parse_references!(r, cross_refs, date), element.rows, element.rows)
+function parse_references!(element::Markdown.Table, cross_refs, class_dates, current_date_index)
+    map!(r -> parse_references!(r, cross_refs, class_dates, current_date_index), element.rows, element.rows)
 end
 
-function parse_references!(vec::AbstractVector, cross_refs, date)
-    map!(r -> parse_references!(r, cross_refs, date), vec, vec)
+function parse_references!(vec::AbstractVector, cross_refs, class_dates, current_date_index)
+    map!(r -> parse_references!(r, cross_refs, class_dates, current_date_index), vec, vec)
     return vec
 end
 
@@ -183,7 +185,7 @@ function parse_doc(body::AbstractString)
 
             if pass == :references
                 if in_schedule_section
-                    parse_references!(element, cross_refs, class_dates[current_date_index])
+                    parse_references!(element, cross_refs, class_dates, current_date_index)
                 end
             else
                 replace_references!(element, cross_refs)
