@@ -152,6 +152,8 @@ function parse_doc(body::AbstractString)
     excluded_date_reasons = [x[2] for x in front_matter["excluded_dates"]]
     exsort = sortperm(excluded_dates)
 
+    summarize_days_after = haskey(front_matter, "summarize_days_after") ? front_matter["summarize_days_after"] : 3
+
     # build the syllabus object
     syllabus = Syllabus(
         front_matter["start_date"],
@@ -230,7 +232,11 @@ function parse_doc(body::AbstractString)
                         # add the date
                         dates = class_dates[current_date_index:current_date_index+(ndays - 1)]
                         next_date_index = current_date_index + ndays
-                        date_text = join(Dates.format.(dates, DATEFORMAT), ", ")
+                        date_text = if ndays > summarize_days_after
+                            "$(Dates.format(first(dates), DATEFORMAT))–$(Dates.format(last(dates), DATEFORMAT)) ($ndays days)"
+                        else
+                            join(Dates.format.(dates, DATEFORMAT), ", ")
+                        end
 
                         if pass == :output
                             push!(output, Markdown.Header{schedule_day_header_level}(["$date_text: $text"]))
