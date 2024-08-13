@@ -143,6 +143,8 @@ function replace_references!(vec::AbstractVector, cross_refs)
     return vec
 end
 
+replace_references!(lb::Markdown.LineBreak, _) = lb
+
 function parse_doc(body::AbstractString)
     front_matter = YAML.load(body)
 
