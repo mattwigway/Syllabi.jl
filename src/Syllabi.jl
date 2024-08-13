@@ -6,6 +6,7 @@ import Dates: Date, dayofweek, @dateformat_str
 import YAML
 
 const DATEFORMAT = dateformat"U d"
+const DATEFORMAT_DAY = dateformat"d"
 const ANCHOR_REGEX = r"%%((?:[[:alnum:]]|[_\-])+)~?(-?[0-9]+)?"
 const XREF_REGEX = r"@@(?:[[:alnum:]]|[_\-])+"
 
@@ -152,8 +153,6 @@ function parse_doc(body::AbstractString)
     excluded_date_reasons = [x[2] for x in front_matter["excluded_dates"]]
     exsort = sortperm(excluded_dates)
 
-    summarize_days_after = haskey(front_matter, "summarize_days_after") ? front_matter["summarize_days_after"] : 3
-
     # build the syllabus object
     syllabus = Syllabus(
         front_matter["start_date"],
@@ -232,11 +231,19 @@ function parse_doc(body::AbstractString)
                         # add the date
                         dates = class_dates[current_date_index:current_date_index+(ndays - 1)]
                         next_date_index = current_date_index + ndays
-                        date_text = if ndays > summarize_days_after
-                            "$(Dates.format(first(dates), DATEFORMAT))–$(Dates.format(last(dates), DATEFORMAT)) ($ndays days)"
-                        else
-                            join(Dates.format.(dates, DATEFORMAT), ", ")
+                        prev, rest = Iterators.peel(dates)
+                        formatted_dates = [Dates.format(prev, DATEFORMAT)]
+                        for date in rest
+                            if Dates.month(date) == Dates.month(prev)
+                                # don't repeat month
+                                push!(formatted_dates, Dates.format(date, DATEFORMAT_DAY))
+                            else
+                                push!(formatted_dates, Dates.format(date, DATEFORMAT))
+                            end
+                            prev = date
                         end
+
+                        date_text = join(formatted_dates, ", ")
 
                         if pass == :output
                             push!(output, Markdown.Header{schedule_day_header_level}(["$date_text: $text"]))
