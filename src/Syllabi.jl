@@ -7,7 +7,8 @@ import YAML
 
 const DATEFORMAT = dateformat"U d"
 const DATEFORMAT_DAY = dateformat"d"
-const ANCHOR_REGEX = r"%%((?:[[:alnum:]]|[_\-])+)~?(-?[0-9]+)?"
+const ANCHOR_REGEX = r"%%((?:[[:alnum:]]|[_\-])+)~?([cwd0-9-]+)?"
+const OFFSET_REGEX = r"([cwd])(-?[0-9]+)"
 const XREF_REGEX = r"@@(?:[[:alnum:]]|[_\-])+"
 
 
@@ -70,11 +71,57 @@ function parse_header(str)
     end
 end
 
+function weekday_offset(date, days)
+    f = if days < 0
+        Dates.toprev
+    else
+        Dates.tonext
+    end
+
+    days = abs(days)
+    i = 0
+
+    while i < days
+        date += Dates.Day(1)
+        if Dates.dayofweek(date) ≤ 5
+            i += 1
+        end
+    end
+
+    return date
+end
+
 # markdown elements where the content is in the vector .text
 const ElementWithText = Union{Markdown.Header, Markdown.Italic, Markdown.Bold, Markdown.Link}
 
 # markdown elements where the content is in the vector .content
 const ElementWithContent = Union{Markdown.Paragraph}
+
+parse_date_offset(offset::Nothing, class_dates, current_date_index) = class_dates[current_date_index]
+
+function parse_date_offset(offset_str::AbstractString, class_dates, current_date_index)
+    date = class_dates[current_date_index]
+    is_first_offset = true
+
+    for offset in eachmatch(OFFSET_REGEX, offset_str)
+        day_offset = parse(Int64, offset.captures[2])
+        off_type = offset.captures[1] 
+        if off_type == "c"
+            is_first_offset || error("Class-day offsets must be first offset, found $offset_str")
+            # class-day offset
+            date = class_dates[current_date_index + day_offset]
+        elseif off_type == "d"
+            # day offset
+            date += Dates.Day(day_offset)
+        elseif off_type == "w"
+            # weekday offset
+            date = weekday_offset(date, day_offset)
+        end
+        is_first_offset = false
+    end
+    
+    return date
+end
 
 function parse_references!(s::AbstractString, cross_refs, class_dates, current_date_index)
     for anchor in eachmatch(ANCHOR_REGEX, s)
@@ -83,8 +130,7 @@ function parse_references!(s::AbstractString, cross_refs, class_dates, current_d
             println("Warn: duplicate anchor definition $anchtext")
         else
             # figure out offsets - ~ means offset in class days
-            class_day_offset = isnothing(anchor.captures[2]) ? 0 : parse(Int64, anchor.captures[2])
-            cross_refs[anchtext] = class_dates[current_date_index + class_day_offset]
+            cross_refs[anchtext] = parse_date_offset(anchor.captures[2], class_dates, current_date_index)
         end
     end
 
@@ -116,6 +162,8 @@ function parse_references!(vec::AbstractVector, cross_refs, class_dates, current
     return vec
 end
 
+parse_references!(c::Markdown.Code, _, _, _) = c
+
 # Note: this version does not actually mutate its arguments, but needs to have the same signature as the ones that do
 replace_references!(s::AbstractString, cross_refs) = replace(s, XREF_REGEX=>(r -> Dates.format(cross_refs[lowercase(r[3:end])], DATEFORMAT)))
 
@@ -144,7 +192,7 @@ function replace_references!(vec::AbstractVector, cross_refs)
     return vec
 end
 
-replace_references!(lb::Markdown.LineBreak, _) = lb
+replace_references!(lb::Union{Markdown.LineBreak, Markdown.Code}, _) = lb
 
 function parse_doc(body::AbstractString)
     front_matter = YAML.load(body)
