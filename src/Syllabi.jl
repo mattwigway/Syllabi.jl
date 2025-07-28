@@ -72,17 +72,12 @@ function parse_header(str)
 end
 
 function weekday_offset(date, days)
-    f = if days < 0
-        Dates.toprev
-    else
-        Dates.tonext
-    end
-
+    forward = days > 0
     days = abs(days)
     i = 0
 
     while i < days
-        date += Dates.Day(1)
+        date += Dates.Day(forward ? 1 : -1)
         if Dates.dayofweek(date) ≤ 5
             i += 1
         end
@@ -139,7 +134,11 @@ function parse_references!(s::AbstractString, cross_refs, class_dates, current_d
 end
 
 function parse_references!(element::ElementWithText, cross_refs, class_dates, current_date_index)
-    map!(t -> parse_references!(t, cross_refs, class_dates, current_date_index), element.text, element.text)
+    if element.text isa AbstractString
+        element.text = parse_references!(element.text, cross_refs, class_dates, current_date_index)
+    else
+        map!(t -> parse_references!(t, cross_refs, class_dates, current_date_index), element.text, element.text)
+    end
     return element
 end
 
@@ -168,7 +167,11 @@ parse_references!(c::Markdown.Code, _, _, _) = c
 replace_references!(s::AbstractString, cross_refs) = replace(s, XREF_REGEX=>(r -> Dates.format(cross_refs[lowercase(r[3:end])], DATEFORMAT)))
 
 function replace_references!(element::ElementWithText, cross_refs)
-    map!(t -> replace_references!(t, cross_refs), element.text, element.text)
+    if element.text isa AbstractString
+        element.text = replace_references!(element.text, cross_refs)
+    else
+        map!(t -> replace_references!(t, cross_refs), element.text, element.text)
+    end
     return element
 end
 
@@ -221,6 +224,7 @@ function parse_doc(body::AbstractString)
     current_date_index = 1
     next_date_index = 1
     schedule_day_header_level = 0
+    last_start_date = first(class_dates)
     in_schedule_section = false
 
     # run this twice to get cross-refs right
@@ -250,6 +254,7 @@ function parse_doc(body::AbstractString)
                     if contains(lowercase(element.text[1]), "schedule")
                         in_schedule_section = true
                         schedule_day_header_level = hlevel + 1
+                        last_start_date = first(class_dates)
                     end
 
                     if pass == :output
@@ -267,7 +272,7 @@ function parse_doc(body::AbstractString)
 
                         # figure out if we need to add excluded dates - do this here so it's after any content associated with previous date
                         for (date, ex_text) in zip(syllabus.excluded_dates, syllabus.excluded_date_reasons)
-                            if date < class_dates[current_date_index] && (current_date_index == 1 || date > class_dates[current_date_index - 1])
+                            if date < class_dates[current_date_index] && (date > last_start_date)
                                 if pass == :output
                                     push!(output, Markdown.Header{schedule_day_header_level}(["$(Dates.format(date, DATEFORMAT)): No class"]))
                                     push!(output, Markdown.Paragraph([ex_text]))
@@ -278,6 +283,7 @@ function parse_doc(body::AbstractString)
 
                         # add the date
                         dates = class_dates[current_date_index:current_date_index+(ndays - 1)]
+                        last_start_date = first(dates)
                         next_date_index = current_date_index + ndays
                         prev, rest = Iterators.peel(dates)
                         formatted_dates = [Dates.format(prev, DATEFORMAT)]
