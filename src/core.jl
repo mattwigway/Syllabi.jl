@@ -1,0 +1,383 @@
+
+const DATEFORMAT = dateformat"U d"
+const DATEFORMAT_DAY = dateformat"d"
+const ANCHOR_REGEX = r"%%((?:[[:alnum:]]|[_\-])+)~?([cwd0-9-]+)?"
+const OFFSET_REGEX = r"([cwd])(-?[0-9]+)"
+const XREF_REGEX = r"@@(?:[[:alnum:]]|[_\-])+"
+
+
+# Write your package code here.
+struct Syllabus
+    start_date::Date
+    end_date::Date
+    days_of_week::Vector{Int64}  # using Dates.Monday, Dates.Tuesday, etc.
+    excluded_dates::Vector{Date}
+    excluded_date_reasons::Vector{String}
+    added_dates::Vector{Date}
+end
+
+function get_all_class_dates(s::Syllabus)
+    result = Vector{Date}()
+    current = s.start_date
+    if dayofweek(current) ∈ s.days_of_week && current ∉ s.excluded_dates
+        push!(result, current)
+    end
+
+    while current ≤ s.end_date
+        current = Dates.tonext(d -> dayofweek(d) ∈ s.days_of_week, current)
+        if current ∉ s.excluded_dates && current ≤ s.end_date
+            push!(result, current)
+        end
+    end
+
+    push!.(Ref(result), s.added_dates)
+
+    return sort(unique(result))
+end
+
+parse_day_of_week(x::Char) = parse_day_of_week("$x")
+parse_day_of_week(x::AbstractString) = if uppercase(x) ∈ ["M", "MON", "MONDAY"]
+    Dates.Monday
+elseif uppercase(x) ∈ ["T", "TUE", "TUESDAY"]
+    Dates.Tuesday
+elseif uppercase(x) ∈ ["W", "WED", "WEDNESDAY"]
+    Dates.Wednesday
+elseif uppercase(x) ∈ ["R", "THU", "THURSDAY"]
+    Dates.Thursday
+elseif uppercase(x) ∈ ["F", "FRI", "FRIDAY"]
+    Dates.Friday
+elseif uppercase(x) ∈ ["S", "SAT", "SATURDAY"]
+    Dates.Saturday
+elseif uppercase(x) ∈ ["U", "SUN", "SUNDAY"]
+    Dates.Sunday
+end
+
+get_header_level(::Markdown.Header{T}) where T = T
+
+# figure out multi-day classes
+function parse_header(str)
+    exp = r"^(.*?) ?(\{.*\})?$"
+    m = match(exp, str)
+    title = m.captures[1]
+    meta = if !isnothing(m.captures[2])
+        YAML.load(m.captures[2])
+    else
+        Dict{String, Any}()
+    end
+
+    if isnothing(meta)
+        error("YAML failed to parse $(m.captures[2])")
+    end
+
+    if !haskey(meta, "days")
+        meta["days"] = 1
+    end
+
+    return title, meta
+end
+
+function weekday_offset(date, days)
+    forward = days > 0
+    days = abs(days)
+    i = 0
+
+    while i < days
+        date += Dates.Day(forward ? 1 : -1)
+        if Dates.dayofweek(date) ≤ 5
+            i += 1
+        end
+    end
+
+    return date
+end
+
+# markdown elements where the content is in the vector .text
+const ElementWithText = Union{Markdown.Header, Markdown.Italic, Markdown.Bold, Markdown.Link}
+
+# markdown elements where the content is in the vector .content
+const ElementWithContent = Union{Markdown.Paragraph}
+
+parse_date_offset(offset::Nothing, class_dates, current_date_index) = class_dates[current_date_index]
+
+function parse_date_offset(offset_str::AbstractString, class_dates, current_date_index)
+    date = class_dates[current_date_index]
+    is_first_offset = true
+
+    for offset in eachmatch(OFFSET_REGEX, offset_str)
+        day_offset = parse(Int64, offset.captures[2])
+        off_type = offset.captures[1] 
+        if off_type == "c"
+            is_first_offset || error("Class-day offsets must be first offset, found $offset_str")
+            # class-day offset
+            date = class_dates[current_date_index + day_offset]
+        elseif off_type == "d"
+            # day offset
+            date += Dates.Day(day_offset)
+        elseif off_type == "w"
+            # weekday offset
+            date = weekday_offset(date, day_offset)
+        end
+        is_first_offset = false
+    end
+    
+    return date
+end
+
+function parse_references!(s::AbstractString, cross_refs, class_dates, current_date_index)
+    for anchor in eachmatch(ANCHOR_REGEX, s)
+        anchtext = lowercase(anchor.captures[1])
+        if haskey(cross_refs, anchtext)
+            println("Warn: duplicate anchor definition $anchtext")
+        else
+            # figure out offsets - ~ means offset in class days
+            cross_refs[anchtext] = parse_date_offset(anchor.captures[2], class_dates, current_date_index)
+        end
+    end
+
+    # remove anchors from text
+    return replace(s, ANCHOR_REGEX=>"")
+end
+
+function parse_references!(element::ElementWithText, cross_refs, class_dates, current_date_index)
+    if element.text isa AbstractString
+        element.text = parse_references!(element.text, cross_refs, class_dates, current_date_index)
+    else
+        map!(t -> parse_references!(t, cross_refs, class_dates, current_date_index), element.text, element.text)
+    end
+    return element
+end
+
+function parse_references!(element::ElementWithContent, cross_refs, class_dates, current_date_index)
+    map!(t -> parse_references!(t, cross_refs, class_dates, current_date_index), element.content, element.content)
+    return element
+end
+
+function parse_references!(element::Markdown.List, cross_refs, class_dates, current_date_index)
+    map!(i -> parse_references!(i, cross_refs, class_dates, current_date_index), element.items, element.items)
+    return element
+end
+
+function parse_references!(element::Markdown.Table, cross_refs, class_dates, current_date_index)
+    map!(r -> parse_references!(r, cross_refs, class_dates, current_date_index), element.rows, element.rows)
+end
+
+function parse_references!(vec::AbstractVector, cross_refs, class_dates, current_date_index)
+    map!(r -> parse_references!(r, cross_refs, class_dates, current_date_index), vec, vec)
+    return vec
+end
+
+parse_references!(c::Markdown.Code, _, _, _) = c
+
+# Note: this version does not actually mutate its arguments, but needs to have the same signature as the ones that do
+replace_references!(s::AbstractString, cross_refs) = replace(s, XREF_REGEX=>(r -> Dates.format(cross_refs[lowercase(r[3:end])], DATEFORMAT)))
+
+function replace_references!(element::ElementWithText, cross_refs)
+    if element.text isa AbstractString
+        element.text = replace_references!(element.text, cross_refs)
+    else
+        map!(t -> replace_references!(t, cross_refs), element.text, element.text)
+    end
+    return element
+end
+
+function replace_references!(element::ElementWithContent, cross_refs)
+    map!(t -> replace_references!(t, cross_refs), element.content, element.content)
+    return element
+end
+
+function replace_references!(element::Markdown.List, cross_refs)
+    map!(t -> replace_references!(t, cross_refs), element.items, element.items)
+    return element
+end
+
+function replace_references!(element::Markdown.Table, cross_refs)
+    map!(t -> replace_references!(t, cross_refs), element.rows, element.rows)
+    return element
+end
+
+function replace_references!(vec::AbstractVector, cross_refs)
+    map!(t -> replace_references!(t, cross_refs), vec, vec)
+    return vec
+end
+
+replace_references!(lb::Union{Markdown.LineBreak, Markdown.Code}, _) = lb
+
+function parse_doc(body::AbstractString)
+    front_matter = YAML.load(body)
+
+    excluded_dates = [x[1] for x in front_matter["excluded_dates"]]
+    excluded_date_reasons = [x[2] for x in front_matter["excluded_dates"]]
+    exsort = sortperm(excluded_dates)
+
+    start_time = haskey(front_matter, "start_time") ? parse(Time, front_matter["start_time"]) : nothing
+    end_time = haskey(front_matter, "start_time") ? parse(Time, front_matter["end_time"]) : nothing
+
+    # build the syllabus object
+    syllabus = Syllabus(
+        front_matter["start_date"],
+        front_matter["end_date"],
+        parse_day_of_week.(collect(front_matter["days_of_week"])),
+        excluded_dates[exsort],
+        excluded_date_reasons[exsort],
+        front_matter["added_dates"]
+    )
+
+    calendar = Calendar(
+        haskey(front_matter, "ical") && haskey(front_matter["ical"], "url") ? front_matter["ical"]["url"] : nothing,
+        haskey(front_matter, "ical") && haskey(front_matter["ical"], "refresh_interval") ? front_matter["ical"]["refresh_interval"] : "PT12H",
+         Event[]
+    )
+
+    # split only on lines that are ---, not any line that contains ---
+    # ^ and $ refer to the entire document, not individual lines, for split()
+    doc = Markdown.parse(last(split(body, r"(^|\n)---\n")))
+    output = []
+    
+    # find the schedule section
+    class_dates = get_all_class_dates(syllabus)
+    current_date_index = 1
+    next_date_index = 1
+    schedule_day_header_level = 0
+    last_start_date = first(class_dates)
+    in_schedule_section = false
+
+    # run this twice to get cross-refs right
+    cross_refs = Dict{String, Date}()
+
+    for pass in [:references, :output]
+        # NB anchors can't be in schedule headers
+        for element in doc.content
+            # handle cross references
+
+            if pass == :references
+                if in_schedule_section
+                    parse_references!(element, cross_refs, class_dates, current_date_index)
+                end
+            else
+                replace_references!(element, cross_refs)
+            end
+
+            if element isa Markdown.Header
+                hlevel = get_header_level(element)
+
+                if !in_schedule_section
+                    # are we entering a schedule section?
+                    if contains(lowercase(element.text[1]), "schedule")
+                        in_schedule_section = true
+                        schedule_day_header_level = hlevel + 1
+                        last_start_date = first(class_dates)
+                    end
+
+                    if pass == :output
+                        push!(output, element)
+                    end
+                else
+                    # we are in a schedule section
+                    if hlevel == schedule_day_header_level
+                        text, meta = parse_header(element.text[1])
+                        current_date_index = next_date_index
+
+                        if current_date_index + meta["days"] - 1 > length(class_dates)
+                            error("Too many class dates (occurred at day $text)")
+                        end    
+
+                        # figure out if we need to add excluded dates - do this here so it's after any content associated with previous date
+                        for (date, ex_text) in zip(syllabus.excluded_dates, syllabus.excluded_date_reasons)
+                            if date < class_dates[current_date_index] && (date > last_start_date)
+                                if pass == :output
+                                    push!(output, Markdown.Header{schedule_day_header_level}(["$(Dates.format(date, DATEFORMAT)): No class"]))
+                                    push!(output, Markdown.Paragraph([ex_text]))
+                                end
+                            end
+                        end
+
+                        # add the date
+                        dates = class_dates[current_date_index:current_date_index+(meta["days"] - 1)]
+                        last_start_date = first(dates)
+                        next_date_index = current_date_index + meta["days"]
+                        prev, rest = Iterators.peel(dates)
+                        formatted_dates = [Dates.format(prev, DATEFORMAT)]
+                        for date in rest
+                            if Dates.month(date) == Dates.month(prev)
+                                # don't repeat month
+                                push!(formatted_dates, Dates.format(date, DATEFORMAT_DAY))
+                            else
+                                push!(formatted_dates, Dates.format(date, DATEFORMAT))
+                            end
+                            prev = date
+                        end
+
+                        date_text = join(formatted_dates, ", ")
+
+                        if pass == :output
+                            push!(output, Markdown.Header{schedule_day_header_level}(["$date_text: $text"]))
+
+                            if haskey(front_matter, "ical")
+                                for (i, date) in enumerate(dates)
+                                    push!(calendar.events, Event(
+                                        "$(front_matter["ical"]["uid"])-class-$(current_date_index + i - 1)",
+                                        "$(front_matter["ical"]["title"]): $text",
+                                        "$text", # TODO description
+                                        front_matter["location"],
+                                        DateTime(date, haskey(meta, "start") ? parse(Time, meta["start"]) : start_time),
+                                        DateTime(date, haskey(meta, "end") ? parse(Time, meta["end"]) : end_time),
+                                        "-PT30M", # TODO hard-wired
+                                        front_matter["ical"]["tz"]
+                                    ))
+                                end
+                            end
+                        end
+                    elseif hlevel < schedule_day_header_level
+                        # no longer in a schedule section
+                        in_schedule_section = false
+                        current_date_index = 1
+                        next_date_index = 1
+
+                        if pass == :output
+                            push!(output, element)
+                        end
+                    else
+                        if pass == :output
+                            push!(output, element)
+                        end
+                    end
+                end
+            else
+                if pass == :output
+                    push!(output, element)
+                end
+            end
+        end
+    end
+
+    if haskey(front_matter, "ical") && haskey(front_matter["ical"], "dates")
+        for (ref, text) in front_matter["ical"]["dates"]
+            push!(calendar.events, Event(
+                "$(front_matter["ical"]["uid"])-ref-$ref",
+                "$(front_matter["ical"]["title"]): $text",
+                "$text",
+                "",
+                cross_refs[ref],
+                cross_refs[ref],
+                "-PT12H",
+                front_matter["ical"]["tz"]
+            ))
+        end
+    end
+
+    return Markdown.MD(output), calendar
+end
+
+function render(insymd, outmd, outical=nothing)
+    inp = open(x -> read(x, String), insymd)
+    result, calendar = parse_doc(inp)
+    open(outmd, "w") do mdout
+        print(mdout, result)
+    end
+
+    if !isnothing(outical)
+        open(outical, "w") do icalout
+            write(icalout, calendar)
+        end
+    end
+end
