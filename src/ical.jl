@@ -1,10 +1,10 @@
-struct Event{D <: Union{Date, DateTime}}
+mutable struct Event{D <: Union{Date, DateTime}}
     uid::String
     summary::String
     description::String
     location::String
     dtstart::D
-    dtend::D
+    dtend::Union{D, Nothing}
     alarm::String
     tz::String
 end
@@ -19,11 +19,11 @@ writecrlf(io, str) = write(io, "$str\r\n")
 
 ical_esc(s) = escape_string(s, (',', ';'))
 
-ical_date(d::Date, _) = Dates.format(d, dateformat";VALUE=DATE:yyyymmdd")
+ical_date(d::Date, _) = ";VALUE=DATE:" * Dates.format(d, dateformat"yyyymmdd")
 function ical_date(d::DateTime, tzname) 
     tz = TimeZone(tzname)
     zdt = ZonedDateTime(d, tz)
-    Dates.format(astimezone(zdt, tz"UTC"), dateformat":yyyymmddTHHMMSS") * "Z"
+    ":" * Dates.format(astimezone(zdt, tz"UTC"), dateformat"yyyymmddTHHMMSS") * "Z"
 end
 
 function Base.write(io::IO, e::Event)
@@ -33,7 +33,7 @@ function Base.write(io::IO, e::Event)
     writecrlf(io, "DESCRIPTION:$(ical_esc(e.description))")
     writecrlf(io, "LOCATION:$(ical_esc(e.location))")
     writecrlf(io, "DTSTART$(ical_date(e.dtstart, e.tz))")
-    writecrlf(io, "DTEND$(ical_date(e.dtend, e.tz))")
+    isnothing(e.dtend) || writecrlf(io, "DTEND$(ical_date(e.dtend, e.tz))")
     writecrlf(io, "DTSTAMP$(ical_date(Dates.now(Dates.UTC), "UTC"))")
     writecrlf(io, "BEGIN:VALARM")
     writecrlf(io, "TRIGGER:$(e.alarm)")

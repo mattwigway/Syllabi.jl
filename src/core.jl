@@ -317,7 +317,7 @@ function parse_doc(body::AbstractString)
                                     push!(calendar.events, Event(
                                         "$(front_matter["ical"]["uid"])-class-$(current_date_index + i - 1)",
                                         "$(front_matter["ical"]["title"]): $text",
-                                        "$text", # TODO description
+                                        "", # TODO description
                                         front_matter["location"],
                                         DateTime(date, haskey(meta, "start") ? parse(Time, meta["start"]) : start_time),
                                         DateTime(date, haskey(meta, "end") ? parse(Time, meta["end"]) : end_time),
@@ -339,10 +339,16 @@ function parse_doc(body::AbstractString)
                     else
                         if pass == :output
                             push!(output, element)
+                            calendar.events[end].description = calendar.events[end].description * Markdown.plain(element)
                         end
                     end
                 end
             else
+                # not a header
+                if in_schedule_section && !isempty(calendar.events)
+                    calendar.events[end].description = calendar.events[end].description * Markdown.plain(element)
+                end
+
                 if pass == :output
                     push!(output, element)
                 end
@@ -358,8 +364,8 @@ function parse_doc(body::AbstractString)
                 "$text",
                 "",
                 cross_refs[ref],
-                cross_refs[ref],
-                "-PT12H",
+                nothing,
+                "-P1D",
                 front_matter["ical"]["tz"]
             ))
         end
